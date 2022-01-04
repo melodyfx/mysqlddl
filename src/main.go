@@ -32,14 +32,16 @@ func init() {
 
 }
 
+//getPos 链接数据库并获取定位信息
 func getPos(host string, port uint64, username, password string) mysql.Position {
 	conn, _ := client.Connect(host+":"+strconv.Itoa(int(port)), username, password, "")
-	conn.Ping()
-	r, _ := conn.Execute(`show master status`)
-	v1, _ := r.GetStringByName(0, "File")
-	v2, _ := r.GetIntByName(0, "Position")
-	p := mysql.Position{v1, uint32(v2)}
-	conn.Close()
+	_ = conn.Ping()
+	//执行命令获取数据库master信息
+	masterInfo, _ := conn.Execute(`show master status`)
+	fileInfo, _ := masterInfo.GetStringByName(0, "File")
+	positionInfo, _ := masterInfo.GetIntByName(0, "Position")
+	p := mysql.Position{Name: fileInfo, Pos: uint32(positionInfo)}
+	_ = conn.Close()
 	return p
 }
 
@@ -77,45 +79,69 @@ func main() {
 	//开始同步
 	streamer, _ := syncer.StartSync(pos)
 	//校验和算法
-	var checkSumAlgorithm byte = 0
+	checkSumAlgorithm := byte(0)
 	//第一个Rotate事件
 	var firstRotateEvent = true
 	for {
-		ev, _ := streamer.GetEvent(context.Background())
-		event := ev.Header.EventType
-
-		// ev.Dump(os.Stdout)
+		//获取事件流
+		evStream, _ := streamer.GetEvent(context.Background())
+		// evStream.Dump(os.Stdout)
+		//事件类型
+		event := evStream.Header.EventType
+		//如果事件类型是FORMAT_DESCRIPTION_EVENT
+		//
 		if event == replication.FORMAT_DESCRIPTION_EVENT {
-			fde := DecodeFDEvent(ev.RawData)
-			checkSumAlgorithm = fde.ChecksumAlgorithm
+
+			//解析格式化说明事件
+			fdEvent := DecodeFDEvent(evStream.RawData)
+			//一致性校验算法
+			//0 is off, 1 is for CRC32, 255 is undefined
+			checkSumAlgorithm = fdEvent.ChecksumAlgorithm
 		}
 
+		//如果是ROTATE事件
 		if event == replication.ROTATE_EVENT {
 			var rotateEvent replication.RotateEvent
 			if firstRotateEvent == true {
-				rotateEvent = DecodeRotate(checkSumAlgorithm, ev.RawData)
+				rotateEvent = DecodeRotate(checkSumAlgorithm, evStream.RawData)
 			} else {
-				rotateEvent = DecodeRotate(checkSumAlgorithm, ev.RawData)
+				rotateEvent = DecodeRotate(checkSumAlgorithm, evStream.RawData)
 			}
 
 			logrus.Infof("rotate to (%s, %d)", rotateEvent.NextLogName, rotateEvent.Position)
 			log.Printf("rotate to (%s, %d)\n", rotateEvent.NextLogName, rotateEvent.Position)
 		}
+		//设置第一次事件取消
 		firstRotateEvent = false
 		if event == replication.QUERY_EVENT {
-			header := DecodeHeader(ev.RawData)
+			//头部处理
+			header := DecodeHeader(evStream.RawData)
+			//todo 添加类型
+			//ORMAT_DESCRIPTION_EVENT：binlog文件的第一个event，记录版本号等元数据信息
+			//QUERY_EVENT: 存储statement类的信息，基于statement的binlog格式记录sql语句，在row模式下记录事务begin标签
+			//XID_EVENT: 二阶段提交xid记录
+			//TABLE_MAP_EVENT: row模式下记录表源数据，对读取行记录提供规则参考，后面会详细介绍
+			//WRITE_ROWS_EVENT/DELETE_ROWS_EVENT/UPDATE_ROWS_EVENT: row模式下记录对应行数据变化的记录
+			//GTID_LOG_EVENT: 这个就是记录GTID事务号了，用于5.6版本之后基于GTID同步的方式
+			//ROTATE_EVENT: 连接下一个binlog文件
+			//QUERY_EVENT 存储statement类的信息，基于statement的binlog格式记录sql语句，在row模式下记录事务begin标签
+			//跳过创建文件事件
 			if header.Flags == 8 {
 				continue
 			}
-			qe := DecodeBody(checkSumAlgorithm, ev.RawData)
-			query := string(qe.Query)
 
-			//过滤一些DDL
+			queryEvent := DecodeBody(checkSumAlgorithm, evStream.RawData)
+			query := string(queryEvent.Query)
+
+			//过滤一些DDL 刷新权限
 			if strings.TrimSpace(strings.ToUpper(query)) == "FLUSH PRIVILEGES" {
 				continue
 			}
-			logrus.Info(getMsg(checkSumAlgorithm, ev.RawData))
-			log.Printf(getMsg(checkSumAlgorithm, ev.RawData))
+
+			//日志
+			logrus.Info(getMsg(checkSumAlgorithm, evStream.RawData))
+			//控制台日志
+			log.Printf(getMsg(checkSumAlgorithm, evStream.RawData))
 		}
 	}
 

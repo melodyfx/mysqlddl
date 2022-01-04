@@ -11,15 +11,18 @@ import (
 )
 
 const (
-	EventHeaderSize            = 19
-	SidLength                  = 16
+	//EventHeaderSize EventHeader大小
+	EventHeaderSize = 19
+	SidLength       = 16
 	LogicalTimestampTypeCode   = 2
 	PartLogicalTimestampLength = 8
+	//BinlogChecksumLength 二进制验证码长度
 	BinlogChecksumLength       = 4
 	UndefinedServerVer         = 999999 // UNDEFINED_SERVER_VERSION
 )
 
 const (
+	//事件生成但没有校验
 	BINLOG_CHECKSUM_ALG_OFF byte = 0 // Events are without checksum though its generator
 	// is checksum-capable New Master (NM).
 	BINLOG_CHECKSUM_ALG_CRC32 byte = 1 // CRC32 of zlib algorithm.
@@ -64,45 +67,57 @@ func splitServerVersion(server string) []int {
 	return []int{x, y, z}
 }
 
+//DecodeFDEvent 解析格式说明
 func DecodeFDEvent(data []byte) replication.FormatDescriptionEvent {
-	var e replication.FormatDescriptionEvent
+	var fdEvent replication.FormatDescriptionEvent
 	data = data[EventHeaderSize:]
+	//位置
 	pos := 0
-	e.Version = binary.LittleEndian.Uint16(data[pos:])
+	//版本信息
+	fdEvent.Version = binary.LittleEndian.Uint16(data[pos:])
 	pos += 2
 
-	e.ServerVersion = make([]byte, 50)
-	copy(e.ServerVersion, data[pos:])
+	//服务器版本
+	fdEvent.ServerVersion = make([]byte, 50)
+	copy(fdEvent.ServerVersion, data[pos:])
 	pos += 50
 
-	e.CreateTimestamp = binary.LittleEndian.Uint32(data[pos:])
+	//创建时间轴
+	fdEvent.CreateTimestamp = binary.LittleEndian.Uint32(data[pos:])
 	pos += 4
 
-	e.EventHeaderLength = data[pos]
+	//事件长度
+	fdEvent.EventHeaderLength = data[pos]
 	pos++
 
-	if e.EventHeaderLength != byte(EventHeaderSize) {
-		logrus.Errorf("invalid event header length %d, must 19", e.EventHeaderLength)
+	//头部事件长度有问题报错
+	if fdEvent.EventHeaderLength != byte(EventHeaderSize) {
+		logrus.Errorf("invalid event header length %d, must 19", fdEvent.EventHeaderLength)
 	}
 
-	server := string(e.ServerVersion)
+	server := string(fdEvent.ServerVersion)
+	//验证mysql 版本
+	//默认是mysql
 	checksumProduct := checksumVersionProductMysql
+	//如果是mariadb
 	if strings.Contains(strings.ToLower(server), "mariadb") {
 		checksumProduct = checksumVersionProductMariaDB
 	}
 
-	if calcVersionProduct(string(e.ServerVersion)) >= checksumProduct {
+	//
+	if calcVersionProduct(string(fdEvent.ServerVersion)) >= checksumProduct {
 		// here, the last 5 bytes is 1 byte check sum alg type and 4 byte checksum if exists
-		e.ChecksumAlgorithm = data[len(data)-5]
-		e.EventTypeHeaderLengths = data[pos : len(data)-5]
+		fdEvent.ChecksumAlgorithm = data[len(data)-5]
+		fdEvent.EventTypeHeaderLengths = data[pos : len(data)-5]
 	} else {
-		e.ChecksumAlgorithm = BINLOG_CHECKSUM_ALG_UNDEF
-		e.EventTypeHeaderLengths = data[pos:]
+		fdEvent.ChecksumAlgorithm = BINLOG_CHECKSUM_ALG_UNDEF
+		fdEvent.EventTypeHeaderLengths = data[pos:]
 	}
 
-	return e
+	return fdEvent
 }
 
+// DecodeRotate 事件解析
 func DecodeRotate(checksumAlgorithm byte,data []byte) replication.RotateEvent {
 	var e replication.RotateEvent
 	data = data[EventHeaderSize:]
@@ -114,6 +129,7 @@ func DecodeRotate(checksumAlgorithm byte,data []byte) replication.RotateEvent {
 	return e
 }
 
+//DecodeHeader 解码头部
 func  DecodeHeader(data []byte) replication.EventHeader {
 	var h replication.EventHeader
 	if len(data) < EventHeaderSize {
@@ -147,6 +163,7 @@ func  DecodeHeader(data []byte) replication.EventHeader {
 	return h
 }
 
+//DecodeBody Body解码
 func DecodeBody(checksumAlgorithm byte,data []byte) replication.QueryEvent {
 	var e replication.QueryEvent
 	data = data[EventHeaderSize:]
@@ -156,34 +173,43 @@ func DecodeBody(checksumAlgorithm byte,data []byte) replication.QueryEvent {
 
 	pos := 0
 
+	//子数据库代理Id
 	e.SlaveProxyID = binary.LittleEndian.Uint32(data[pos:])
 	pos += 4
 
+	//执行事件
 	e.ExecutionTime = binary.LittleEndian.Uint32(data[pos:])
 	pos += 4
 
+	//模式长度
 	schemaLength := data[pos]
 	pos++
 
+	//错误代码
 	e.ErrorCode = binary.LittleEndian.Uint16(data[pos:])
 	pos += 2
 
+	//状态变量长度
 	statusVarsLength := binary.LittleEndian.Uint16(data[pos:])
 	pos += 2
 
+	//状态变量
 	e.StatusVars = data[pos : pos+int(statusVarsLength)]
 	pos += int(statusVarsLength)
 
+	//模式
 	e.Schema = data[pos : pos+int(schemaLength)]
 	pos += int(schemaLength)
 
 	//skip 0x00
 	pos++
 
+	//查询数据
 	e.Query = data[pos:]
 	return e
 }
 
+//getMsg 获取日志
 func getMsg(checksumAlgorithm byte,rawData []byte) string{
 	var msg string
 
